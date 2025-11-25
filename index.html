@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Fermi–Dirac Solver</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    :root{
+      --bg:#071226; --card:#081322; --panel:#0b1724; --muted:#9aa6b2; --accent:#3b82f6; 
+      --glass:rgba(255,255,255,0.02); --card-radius:14px;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;font-family:Inter,system-ui; 
+      background:linear-gradient(180deg,#041022 0%,#071224 100%);
+      min-height:100vh;display:flex;justify-content:center;padding:28px;color:#e6eef8;
+    }
+    .container{width:100%;max-width:1200px}
+    .card{background:rgba(255,255,255,0.02);padding:18px;border-radius:14px;box-shadow:0 10px 40px #020817aa}
+
+    header{display:flex;align-items:center;margin-bottom:12px}
+    header h1{margin:0;font-size:20px}
+
+    .grid{display:grid;grid-template-columns:420px 1fr;gap:18px}
+
+    .panel{background:var(--card);padding:16px;border-radius:12px}
+    label{font-size:13px;color:var(--muted);margin-bottom:4px;display:block}
+
+    input, select{
+      width:100%;padding:10px;border-radius:10px;
+      border:1px solid rgba(255,255,255,0.04);
+      background:var(--glass);color:#e6eef8;
+      margin-bottom:8px;
+    }
+
+    .controls{display:flex;gap:8px;margin-top:12px}
+    button{
+      padding:10px 14px;border-radius:10px;border:0;cursor:pointer;
+      font-weight:700;background:var(--accent);color:#042331;
+    }
+    .btn-ghost{
+      background:transparent;border:1px dashed rgba(255,255,255,0.06);color:var(--muted)
+    }
+
+    .output{background:var(--panel);padding:12px;border-radius:12px;display:flex;flex-direction:column;gap:8px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:10px 8px;border-bottom:1px dashed rgba(255,255,255,0.05)}
+    th{color:#a9d6ff;}
+
+    @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+
+<body>
+<div class="container">
+<div class="card">
+<header>
+  <h1>Fermi–Dirac Solver</h1>
+</header>
+
+<div class="grid">
+
+<!-- LEFT PANEL -->
+<div class="panel">
+
+  <label>Jumlah partikel (N)</label>
+  <input id="inputN" type="number" value="4" />
+
+  <label>Degenerasi tiap level (gᵢ), pisahkan koma</label>
+  <input id="inputG" type="text" value="1,2" />
+
+  <!-- 🌟 NEW: Energi level -->
+  <label>Tingkat energi tiap level (Eᵢ), pisahkan koma</label>
+  <input id="inputE" type="text" placeholder="contoh: 0.5, 1.0" />
+
+  <!-- 🌟 Unit Energi -->
+  <label>Satuan energi</label>
+  <select id="unitSelect">
+    <option value="eV">Elektronvolt (eV)</option>
+    <option value="J">Joule (J)</option>
+  </select>
+
+  <div class="controls">
+    <button id="runBtn">Hitung</button>
+    <button id="csvBtn" class="btn-ghost">Download CSV</button>
+    <button id="resetBtn" class="btn-ghost">Reset</button>
+  </div>
+</div>
+
+<!-- RIGHT OUTPUT -->
+<div class="output">
+  <div id="summary"></div>
+  <div id="tableWrap" style="max-height:420px;overflow:auto"></div>
+  <canvas id="probChart" style="max-height:220px"></canvas>
+</div>
+
+</div>
+</div>
+</div>
+
+<script>
+/* -----------------------------------
+   Helper Math
+----------------------------------- */
+function combinations(n,r){
+  if(r>n||r<0) return 0;
+  r = Math.min(r, n-r);
+  let num=1, den=1;
+  for(let i=0;i<r;i++){ num *= (n - i); den *= (i+1); }
+  return Math.round(num/den);
+}
+function parseList(txt){
+  return txt.split(',').map(s=>parseFloat(s.trim()));
+}
+function parseG(txt){
+  return txt.split(',').map(s=>parseInt(s.trim()));
+}
+function generateMacrostates(g,N){
+  const res=[]; const arr=new Array(g.length).fill(0);
+  function go(i,rem){
+    if(i===g.length){ if(rem===0) res.push(arr.slice()); return; }
+    for(let k=0;k<=g[i] && k<=rem;k++){ arr[i]=k; go(i+1, rem-k); }
+    arr[i]=0;
+  }
+  go(0,N); return res;
+}
+function fdMicrostates(k,g){ return k.reduce((p,ki,i)=>p*combinations(g[i],ki),1); }
+
+/* Energy Conversion */
+const EV_TO_J = 1.602176634e-19;
+function convertArray(arr,unit){
+  if(unit==="eV") return arr.map(v=>v*EV_TO_J);
+  return arr; // already J
+}
+
+/* DOM */
+const inputN=document.getElementById("inputN");
+const inputG=document.getElementById("inputG");
+const inputE=document.getElementById("inputE");
+const unitSelect=document.getElementById("unitSelect");
+const runBtn=document.getElementById("runBtn");
+const csvBtn=document.getElementById("csvBtn");
+const resetBtn=document.getElementById("resetBtn");
+const summary=document.getElementById("summary");
+const tableWrap=document.getElementById("tableWrap");
+const probChart=document.getElementById("probChart");
+
+let chartObj=null;
+let latest={};
+
+/* Rendering */
+function renderTable(macros,fd){
+  let html=`<table><thead><tr><th>Macro (kᵢ)</th><th>FD mikrostate</th></tr></thead><tbody>`;
+  for(let i=0;i<macros.length;i++){
+    html+=`<tr><td>[${macros[i].join(',')}]</td><td>${fd[i]}</td></tr>`;
+  }
+  html+=`</tbody></table>`;
+  tableWrap.innerHTML=html;
+}
+
+function renderSummary(M,macros,norm,S,Es,unit){
+  summary.innerHTML=`
+    <div class="small">Total state (M): <strong>${M}</strong></div>
+    <div class="small">Jumlah macrostate: <strong>${macros.length}</strong></div>
+    <div class="small">Entropi S: <strong>${S.toFixed(6)}</strong></div>
+    <div class="small">Energi level (${unit}): [${Es.join(', ')}]</div>
+  `;
+}
+
+function drawChart(norm){
+  const ctx=probChart.getContext("2d");
+  if(chartObj) chartObj.destroy();
+  chartObj=new Chart(ctx,{
+    type:"bar",
+    data:{labels:norm.map((_,i)=>`S${i+1}`),datasets:[{data:norm}]},
+    options:{scales:{y:{beginAtZero:true}}}
+  });
+}
+
+/* MAIN */
+runBtn.onclick=()=>{
+  const N=parseInt(inputN.value);
+  const g=parseG(inputG.value);
+  let Es=parseList(inputE.value);
+
+  if(Es.length!==g.length){
+    alert("Jumlah Eᵢ harus sama dengan jumlah level gᵢ");
+    return;
+  }
+
+  const unit=unitSelect.value;
+
+  const M=g.reduce((a,b)=>a+b,0);
+  if(N>M){ alert("N tidak boleh lebih besar dari total state M"); return;}
+
+  const macros=generateMacrostates(g,N);
+  const fdVals=macros.map(k=>fdMicrostates(k,g));
+  const total=fdVals.reduce((a,b)=>a+b,0);
+  const norm=fdVals.map(v=>v/total);
+  const S= -norm.reduce((a,p)=>a+(p>0?p*Math.log(p):0),0);
+
+  /* Convert energies for display only */
+  latest={
+    macros, fdVals, norm, S,
+    Es,
+    EsJ: convertArray(Es,unit)
+  };
+
+  renderTable(macros,fdVals);
+  renderSummary(M,macros,norm,S,Es,unit);
+  drawChart(norm);
+};
+
+/* CSV */
+csvBtn.onclick=()=>{
+  if(!latest.macros){ alert("Hitung dulu."); return; }
+  let lines=["macro,fd"];
+  latest.macros.forEach((m,i)=>{
+    lines.push(`"[${m.join(',')}]",${latest.fdVals[i]}`);
+  });
+  const blob=new Blob([lines.join("\n")],{type:"text/csv"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url; a.download="fermi_fd.csv"; a.click();
+  URL.revokeObjectURL(url);
+};
+
+/* RESET */
+resetBtn.onclick=()=>{
+  inputN.value=4;
+  inputG.value="1,2";
+  inputE.value="";
+  unitSelect.value="eV";
+  summary.innerHTML="";
+  tableWrap.innerHTML="";
+  if(chartObj) chartObj.destroy();
+};
+</script>
+</body>
+</html>
